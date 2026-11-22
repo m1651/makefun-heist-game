@@ -1,261 +1,375 @@
-// All drawing for The Midnight Vault: the room, vision cones, cameras, loot,
-// the thief and the guards, the HUD and every screen. Canvas 2D only, no assets.
-import { ALARM, CAMERA, FIELD, GUARD, TILE } from './config.js';
+// render.js — every pixel of The Gilded Fox: the museum floor, walls and
+// cover, the guards' vision cones (ray-cast so walls cut them off), the
+// sweeping cameras, the loot, the exit door, the thief, and the HUD with
+// its alarm meter. One frame should tell the whole story at a glance.
+import { TILE, COLS, ROWS, DETECT_RANGE, CAMERA_RANGE, CONE_HALF_ANGLE, ALARM_CAUGHT_AT, GHOST_BONUS } from './config.js';
+import { tileAt } from './world.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_LEVEL_CLEAR = 'level-clear';
-export const SCREEN_OVER = 'over';
-export const SCREEN_WIN = 'win';
+const W = COLS * TILE;
+const H = ROWS * TILE;
 
-const LOOT_DRAW = {
-  diamond: { color: '#5ff2ff', label: '◆' },
-  gold: { color: '#ffd34d', label: '$' },
-  art: { color: '#ff9de2', label: '▣' },
-};
-
-/** Draw one vision cone: a translucent wedge from (x, y) facing `angle`. */
-function drawCone(ctx, x, y, angle, range, halfAngle, color) {
-  ctx.save();
+function conePolygon(ctx, def, x, y, angle, range) {
+  const rays = 26;
   ctx.beginPath();
   ctx.moveTo(x, y);
-  ctx.arc(x, y, range, angle - halfAngle, angle + halfAngle);
+  for (let i = 0; i <= rays; i++) {
+    const a = angle - CONE_HALF_ANGLE + (2 * CONE_HALF_ANGLE * i) / rays;
+    let r = range;
+    for (let d = 12; d < range; d += 12) {
+      if (['#', 'C', 'P', 'V'].includes(tileAt(def, x + Math.cos(a) * d, y + Math.sin(a) * d))) { r = d; break; }
+    }
+    ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
+  }
   ctx.closePath();
-  ctx.fillStyle = color;
+}
+
+function drawCone(ctx, def, x, y, angle, range, heat) {
+  // heat 0 = calm yellow, 1 = fully alerted red.
+  const r = Math.round(255);
+  const g = Math.round(200 - 140 * heat);
+  const b = Math.round(60 - 40 * heat);
+  ctx.save();
+  conePolygon(ctx, def, x, y, angle, range);
+  ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${heat > 0.25 ? 0.38 : 0.22})`;
   ctx.fill();
+  ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.55)`;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
   ctx.restore();
 }
 
-/** Draw the floor tiles, walls and crates of the room. */
-function drawRoom(ctx, world) {
-  ctx.fillStyle = '#171a2b';
-  ctx.fillRect(0, 0, FIELD.width, FIELD.height);
-  ctx.strokeStyle = '#20243a';
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= FIELD.width; x += TILE) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, FIELD.height); ctx.stroke();
+function drawTileFloor(ctx, def) {
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const ch = def.map[y][x];
+      const px = x * TILE;
+      const py = y * TILE;
+      if (ch === '#') {
+        ctx.fillStyle = '#2b2f3a';
+        ctx.fillRect(px, py, TILE, TILE);
+        ctx.fillStyle = '#3a4052';
+        ctx.fillRect(px, py, TILE, 5);
+        ctx.fillStyle = '#232733';
+        ctx.fillRect(px, py + TILE - 4, TILE, 4);
+        continue;
+      }
+      // Checkerboard marble floor, darker in the vault wing.
+      const dark = (x + y) % 2 === 0;
+      ctx.fillStyle = ch === 'V' ? '#1d2b33' : dark ? '#232838' : '#272d40';
+      ctx.fillRect(px, py, TILE, TILE);
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.strokeRect(px + 0.5, py + 0.5, TILE - 1, TILE - 1);
+      if (ch === 'V') {
+        ctx.strokeStyle = '#3f6d7d';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(px + 6, py + TILE / 2);
+        ctx.lineTo(px + TILE - 6, py + TILE / 2);
+        ctx.moveTo(px + 6, py + TILE / 2 - 7);
+        ctx.lineTo(px + TILE - 6, py + TILE / 2 - 7);
+        ctx.moveTo(px + 6, py + TILE / 2 + 7);
+        ctx.lineTo(px + TILE - 6, py + TILE / 2 + 7);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+      if (ch === 'C') {
+        ctx.fillStyle = '#6b4a2b';
+        ctx.fillRect(px + 4, py + 4, TILE - 8, TILE - 8);
+        ctx.strokeStyle = '#8a6238';
+        ctx.strokeRect(px + 4.5, py + 4.5, TILE - 9, TILE - 9);
+        ctx.beginPath();
+        ctx.moveTo(px + 4, py + 4);
+        ctx.lineTo(px + TILE - 4, py + TILE - 4);
+        ctx.moveTo(px + TILE - 4, py + 4);
+        ctx.lineTo(px + 4, py + TILE - 4);
+        ctx.stroke();
+      }
+      if (ch === 'P') {
+        ctx.fillStyle = '#2c4a2e';
+        ctx.beginPath();
+        ctx.arc(px + TILE / 2, py + TILE / 2, 14, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#3f6b41';
+        ctx.beginPath();
+        ctx.arc(px + TILE / 2 - 6, py + TILE / 2 - 4, 8, 0, Math.PI * 2);
+        ctx.arc(px + TILE / 2 + 7, py + TILE / 2 + 3, 7, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
   }
-  for (let y = 0; y <= FIELD.height; y += TILE) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(FIELD.width, y); ctx.stroke();
-  }
-  for (const w of world.walls) {
-    ctx.fillStyle = '#2c3152';
-    ctx.fillRect(w.x, w.y, w.w, w.h);
-    ctx.fillStyle = '#3a4066';
-    ctx.fillRect(w.x, w.y, w.w, 5);
-  }
-  for (const c of world.crates) {
-    ctx.fillStyle = '#6b4a2b';
-    ctx.fillRect(c.x + 2, c.y + 2, c.w - 4, c.h - 4);
-    ctx.strokeStyle = '#8a6136';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(c.x + 2, c.y + 2, c.w - 4, c.h - 4);
+}
+
+function drawLoot(ctx, loot) {
+  for (const item of loot) {
+    if (item.taken) continue;
+    const { x, y, kind } = item;
+    const bob = Math.sin(Date.now() / 300 + x) * 2;
+    ctx.save();
+    ctx.translate(x, y + bob);
+    if (kind === 'G') {
+      ctx.fillStyle = '#f5c542';
+      ctx.fillRect(-11, -6, 22, 12);
+      ctx.fillStyle = '#ffe27a';
+      ctx.fillRect(-11, -6, 22, 4);
+      ctx.strokeStyle = '#a87f14';
+      ctx.strokeRect(-11.5, -6.5, 23, 13);
+    } else if (kind === 'D') {
+      ctx.fillStyle = '#7fe7ff';
+      ctx.beginPath();
+      ctx.moveTo(0, -13);
+      ctx.lineTo(11, 0);
+      ctx.lineTo(0, 13);
+      ctx.lineTo(-11, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.beginPath();
+      ctx.moveTo(0, -13);
+      ctx.lineTo(5, 0);
+      ctx.lineTo(0, 13);
+      ctx.lineTo(-5, 0);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#7a4a21';
+      ctx.fillRect(-13, -10, 26, 20);
+      ctx.fillStyle = '#c98f4e';
+      ctx.fillRect(-10, -7, 20, 14);
+      ctx.fillStyle = '#e8b06a';
+      ctx.beginPath();
+      ctx.arc(0, 0, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.fillStyle = 'rgba(255,220,120,0.5)';
     ctx.beginPath();
-    ctx.moveTo(c.x + 2, c.y + 2); ctx.lineTo(c.x + c.w - 2, c.y + c.h - 2);
-    ctx.moveTo(c.x + c.w - 2, c.y + 2); ctx.lineTo(c.x + 2, c.y + c.h - 2);
+    ctx.arc(x, y + bob, 18, 0, Math.PI * 2);
     ctx.stroke();
   }
 }
 
-/** Draw the loot still on the floor, glowing so it reads at a glance. */
-function drawLoot(ctx, world, time) {
-  const pulse = 0.55 + 0.35 * Math.sin(time * 4);
-  for (const item of world.loot) {
-    if (item.taken) continue;
-    const draw = LOOT_DRAW[item.kind];
-    ctx.save();
-    ctx.globalAlpha = pulse;
-    ctx.fillStyle = draw.color;
+function drawExit(ctx, exit, open) {
+  const { x, y } = exit;
+  ctx.fillStyle = open ? '#1fae5f' : '#3d5a45';
+  ctx.fillRect(x - 18, y - 18, 36, 36);
+  ctx.strokeStyle = open ? '#7dffb0' : '#5c7a64';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(x - 18, y - 18, 36, 36);
+  ctx.lineWidth = 1;
+  ctx.fillStyle = '#eafff1';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(open ? 'EXIT' : 'LOCKED', x, y);
+  if (open) {
+    ctx.fillStyle = `rgba(125,255,176,${0.25 + 0.15 * Math.sin(Date.now() / 250)})`;
     ctx.beginPath();
-    ctx.arc(item.x, item.y, 20, 0, Math.PI * 2);
+    ctx.arc(x, y, 26, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
-    ctx.fillStyle = '#0b0e1a';
-    ctx.font = 'bold 20px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(draw.label, item.x, item.y + 1);
   }
 }
 
-/** Draw the green getaway door and its label. */
-function drawExit(ctx, world) {
-  const allLoot = world.loot.every((item) => item.taken);
+function drawPlayer(ctx, player) {
+  const { x, y } = player;
   ctx.save();
-  ctx.fillStyle = allLoot ? '#2ecc71' : '#1e7a46';
-  ctx.fillRect(world.exit.x - 18, world.exit.y - 18, 36, 36);
-  ctx.strokeStyle = allLoot ? '#a9f5c8' : '#2ecc71';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(world.exit.x - 18, world.exit.y - 18, 36, 36);
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 11px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('EXIT', world.exit.x, world.exit.y - 26);
+  ctx.translate(x, y);
+  // Tail.
+  ctx.strokeStyle = '#c96a1e';
+  ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(0, 6);
+  ctx.quadraticCurveTo(-14, 12, -18, 2);
+  ctx.stroke();
+  // Cloak body.
+  ctx.fillStyle = player.sneaking ? '#1e4d5c' : '#274b63';
+  ctx.beginPath();
+  ctx.arc(0, 0, 13, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#0f2b36';
+  ctx.beginPath();
+  ctx.arc(0, 3, 9, 0, Math.PI);
+  ctx.fill();
+  // Fox ears.
+  ctx.fillStyle = '#e07b24';
+  ctx.beginPath();
+  ctx.moveTo(-9, -8);
+  ctx.lineTo(-5, -19);
+  ctx.lineTo(-1, -9);
+  ctx.closePath();
+  ctx.moveTo(9, -8);
+  ctx.lineTo(5, -19);
+  ctx.lineTo(1, -9);
+  ctx.closePath();
+  ctx.fill();
+  // Face.
+  ctx.fillStyle = '#f4e6c8';
+  ctx.beginPath();
+  ctx.arc(0, -2, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(-2.5, -3, 1.4, 0, Math.PI * 2);
+  ctx.arc(2.5, -3, 1.4, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
+  if (player.sneaking) {
+    ctx.fillStyle = 'rgba(180,230,255,0.8)';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('sneaking', x, y - 24);
+  }
 }
 
-/** Draw the thief: a hooded figure with a facing tick. */
-function drawPlayer(ctx, world) {
-  const p = world.player;
+function drawGuard(ctx, def, guard) {
+  drawCone(ctx, def, guard.x, guard.y, guard.angle, DETECT_RANGE, guard.seen);
   ctx.save();
-  ctx.fillStyle = p.sneaking ? '#7a5cff' : '#b78cff';
+  ctx.translate(guard.x, guard.y);
+  ctx.fillStyle = guard.state === 'chase' ? '#c0392b' : '#2c3e50';
   ctx.beginPath();
-  ctx.arc(p.x, p.y, 13, 0, Math.PI * 2);
+  ctx.arc(0, 0, 13, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#0b0e1a';
-  ctx.beginPath();
-  ctx.arc(p.x + Math.cos(p.angle) * 6, p.y + Math.sin(p.angle) * 6, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#e9d5ff';
+  ctx.strokeStyle = guard.state === 'chase' ? '#ff6b5e' : '#7f8c8d';
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(p.x, p.y, 13, 0, Math.PI * 2);
   ctx.stroke();
+  // Cap and visor.
+  ctx.fillStyle = '#1a252f';
+  ctx.fillRect(-9, -12, 18, 6);
+  ctx.fillStyle = '#f5d76e';
+  ctx.fillRect(-7, -4, 14, 3);
   ctx.restore();
-}
-
-/** Draw a guard: navy body, facing tick, and its yellow vision cone. */
-function drawGuard(ctx, guard, world, time) {
-  const alert = world.spotted;
-  drawCone(ctx, guard.x, guard.y, guard.angle, GUARD.coneRange, GUARD.coneHalfAngle,
-    alert ? 'rgba(255,80,60,0.30)' : 'rgba(255,214,64,0.22)');
-  ctx.save();
-  ctx.fillStyle = '#3d6bff';
-  ctx.beginPath();
-  ctx.arc(guard.x, guard.y, 13, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#dbeafe';
-  ctx.beginPath();
-  ctx.arc(guard.x + Math.cos(guard.angle) * 6, guard.y + Math.sin(guard.angle) * 6, 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(guard.x, guard.y, 13, 0, Math.PI * 2);
-  ctx.stroke();
   if (guard.state === 'investigate') {
-    ctx.fillStyle = '#ffd64d';
+    ctx.fillStyle = '#ffd34d';
     ctx.font = 'bold 16px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('?', guard.x, guard.y - 22);
   }
-  ctx.restore();
+  if (guard.state === 'chase') {
+    ctx.fillStyle = '#ff5b4d';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('!', guard.x, guard.y - 22);
+  }
 }
 
-/** Draw a wall camera: a red sweeping cone and a small mount. */
-function drawCamera(ctx, cam, world) {
-  drawCone(ctx, cam.x, cam.y, cam.angle, CAMERA.coneRange, CAMERA.coneHalfAngle,
-    world.spotted ? 'rgba(255,60,60,0.35)' : 'rgba(255,60,60,0.20)');
+function drawCamera(ctx, def, cam) {
+  drawCone(ctx, def, cam.x, cam.y, cam.angle, CAMERA_RANGE, cam.seen);
   ctx.save();
-  ctx.fillStyle = '#ff4d4d';
+  ctx.translate(cam.x, cam.y);
+  ctx.fillStyle = '#444';
+  ctx.fillRect(-9, -9, 18, 18);
+  ctx.fillStyle = cam.seen > 0.3 ? '#ff3b30' : '#e74c3c';
   ctx.beginPath();
-  ctx.arc(cam.x, cam.y, 8, 0, Math.PI * 2);
+  ctx.arc(Math.cos(cam.angle) * 10, Math.sin(cam.angle) * 10, 5, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(cam.x, cam.y, 8, 0, Math.PI * 2);
-  ctx.stroke();
   ctx.restore();
 }
 
-/** The HUD bar: loot, alarm meter, lives, coins, level and score. */
-function drawHud(ctx, world) {
-  ctx.save();
-  ctx.fillStyle = 'rgba(5,7,16,0.88)';
-  ctx.fillRect(0, 0, FIELD.width, 44);
-  ctx.fillStyle = '#ffffff';
+function drawCoins(ctx, coins) {
+  for (const c of coins) {
+    ctx.fillStyle = '#ffd94d';
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#a87f14';
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,217,77,0.6)';
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 9 + Math.sin(Date.now() / 150) * 2, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawHud(ctx, s) {
+  ctx.fillStyle = 'rgba(10,12,20,0.88)';
+  ctx.fillRect(0, 0, W, 44);
+  ctx.fillStyle = '#e8e4d8';
   ctx.font = 'bold 15px sans-serif';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`LOOT ${world.lootTaken}/${world.loot.length}`, 14, 23);
-  ctx.fillText(`SCORE ${world.score}`, 150, 23);
-  ctx.fillText(`LEVEL ${world.levelIndex + 1} — ${world.def.name}`, 300, 23);
-  // Alarm meter: green when calm, red when hot, labelled so it reads at a glance.
-  ctx.fillText('ALARM', 560, 23);
-  ctx.fillStyle = '#22263d';
-  ctx.fillRect(625, 13, 150, 18);
-  const frac = world.alarm / ALARM.max;
-  ctx.fillStyle = frac < 0.5 ? '#2ecc71' : frac < 0.8 ? '#f5a623' : '#ff4d4d';
-  ctx.fillRect(625, 13, 150 * frac, 18);
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(625, 13, 150, 18);
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText('♥'.repeat(Math.max(0, world.lives)), 800, 23);
-  ctx.fillText(`COINS ${world.coinsLeft}`, 870, 23);
-  ctx.restore();
+  ctx.fillText(s.levelName, 14, 22);
+  // Alarm meter.
+  const ax = 250;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(ax, 12, 220, 20);
+  const alarmFrac = s.alarm / ALARM_CAUGHT_AT;
+  ctx.fillStyle = alarmFrac < 0.5 ? '#f5c542' : alarmFrac < 0.8 ? '#ff8c1a' : '#ff3b30';
+  ctx.fillRect(ax, 12, 220 * Math.min(1, alarmFrac), 20);
+  ctx.strokeStyle = '#888';
+  ctx.strokeRect(ax + 0.5, 12.5, 220, 20);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.fillText('ALARM', ax + 6, 22);
+  // Loot, lives, coins, score, time.
+  ctx.font = '15px sans-serif';
+  ctx.fillStyle = '#ffd94d';
+  ctx.fillText(`💰 ${s.lootTaken}/${s.lootTotal}`, 500, 22);
+  ctx.fillStyle = '#ff6b81';
+  ctx.fillText(`♥ ${'♥'.repeat(Math.max(0, s.lives))}`, 590, 22);
+  ctx.fillStyle = '#9fd8ff';
+  ctx.fillText(`◉ coins ${s.coins}`, 680, 22);
+  ctx.fillStyle = '#e8e4d8';
+  ctx.fillText(`Score ${s.score}`, 800, 22);
+  ctx.fillText(`⏱ ${Math.floor(s.timeLeft)}s`, 920, 22);
+  ctx.fillStyle = s.exitOpen ? '#7dffb0' : '#9aa3b2';
+  ctx.fillText(s.exitOpen ? '→ EXIT OPEN' : '→ grab the loot', 1010, 22);
 }
 
-/** A dim overlay panel with centred title and lines, for title / end screens. */
-function drawPanel(ctx, title, lines, accent) {
-  ctx.save();
-  ctx.fillStyle = 'rgba(5,7,16,0.82)';
-  ctx.fillRect(0, 0, FIELD.width, FIELD.height);
-  ctx.fillStyle = accent;
-  ctx.font = 'bold 44px sans-serif';
+function overlay(ctx, title, lines, accent) {
+  ctx.fillStyle = 'rgba(8,10,18,0.78)';
+  ctx.fillRect(0, 0, W, H);
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(title, FIELD.width / 2, 170);
-  ctx.fillStyle = '#e8eaf6';
-  ctx.font = '18px sans-serif';
-  lines.forEach((line, i) => ctx.fillText(line, FIELD.width / 2, 240 + i * 34));
-  ctx.restore();
+  ctx.fillStyle = accent;
+  ctx.font = 'bold 44px Georgia, serif';
+  ctx.fillText(title, W / 2, H / 2 - 70);
+  ctx.fillStyle = '#e8e4d8';
+  ctx.font = '19px sans-serif';
+  lines.forEach((line, i) => ctx.fillText(line, W / 2, H / 2 - 10 + i * 30));
 }
 
-/** Draw the whole play field: room, cones, loot, actors and HUD. */
-export function drawWorld(ctx, world, time) {
-  ctx.save();
-  ctx.translate(0, 44); // the HUD bar occupies the top 44 px
-  drawRoom(ctx, world);
-  drawExit(ctx, world);
-  drawLoot(ctx, world, time);
-  for (const cam of world.cameras) drawCamera(ctx, cam, world);
-  for (const guard of world.guards) drawGuard(ctx, guard, world, time);
-  for (const decoy of world.decoys) {
-    ctx.fillStyle = '#ffd34d';
-    ctx.beginPath();
-    ctx.arc(decoy.x, decoy.y, 5, 0, Math.PI * 2);
-    ctx.fill();
+export function render(ctx, s) {
+  ctx.clearRect(0, 0, W, H);
+  drawTileFloor(ctx, s.def);
+  for (const cam of s.cameras) drawCamera(ctx, s.def, cam);
+  drawLoot(ctx, s.loot);
+  drawExit(ctx, s.exit, s.exitOpen);
+  drawCoins(ctx, s.coinsInFlight);
+  for (const guard of s.guards) drawGuard(ctx, s.def, guard);
+  drawPlayer(ctx, s.player);
+  // Caught flash.
+  if (s.caughtFlash > 0) {
+    ctx.fillStyle = `rgba(255,40,30,${Math.min(0.45, s.caughtFlash * 0.45)})`;
+    ctx.fillRect(0, 0, W, H);
   }
-  drawPlayer(ctx, world);
-  ctx.restore();
-  drawHud(ctx, world);
-}
-
-/** Draw one screen over the world. */
-export function drawScreen(ctx, screen, world, time) {
-  if (screen === SCREEN_PLAY) {
-    drawWorld(ctx, world, time);
-    return;
-  }
-  drawWorld(ctx, world, time);
-  if (screen === SCREEN_TITLE) {
-    drawPanel(ctx, 'THE MIDNIGHT VAULT', [
-      'A stealth heist in three rooms. Pocket every piece of loot, then slip out the green EXIT door.',
-      'Move: WASD or arrow keys    Sneak (slow, hard to see): hold Shift',
-      'Throw a decoy coin (click): lures nearby guards away — 3 per level',
-      'Guards and cameras raise the ALARM when you cross their cones. At 100% you are caught.',
-      'Crates and walls block sight. Plan your route before you move.',
-      '',
-      'Click or press Enter to start the heist.',
-    ], '#ffd34d');
-  } else if (screen === SCREEN_LEVEL_CLEAR) {
-    drawPanel(ctx, 'CLEAN GETAWAY!', [
-      `${world.def.name} cleared. Loot ${world.lootTaken}/${world.loot.length} — score ${world.score}.`,
-      'Press Enter for the next room.',
-    ], '#2ecc71');
-  } else if (screen === SCREEN_OVER) {
-    drawPanel(ctx, 'CAUGHT!', [
-      'The alarm hit 100% and the guards closed in.',
-      `You pocketed ${world.lootTaken} piece(s) of loot and scored ${world.score} points.`,
-      'Press Enter to try the heist again.',
-    ], '#ff4d4d');
-  } else if (screen === SCREEN_WIN) {
-    drawPanel(ctx, 'THE PERFECT HEIST!', [
-      'All three rooms cleaned out. The vault is empty and you are gone.',
-      `Final score: ${world.score} points.`,
-      'Press Enter to play again.',
-    ], '#5ff2ff');
+  drawHud(ctx, s);
+  if (s.state === 'title') {
+    overlay(ctx, 'THE GILDED FOX', [
+      'A three-floor museum heist. Steal everything, wake nobody, vanish.',
+      'WASD / arrows — move      Shift — sneak      E — toss a coin to distract',
+      'Space — grab loot      P — pause      M — mute',
+      'Guards and cameras raise the ALARM when they see you. Fill it and you are caught.',
+      'Vents hide you. Crates and plants block their sight. The green door opens when the loot is gone.',
+      'Press Enter to start the heist',
+    ], '#f5c542');
+  } else if (s.state === 'paused') {
+    overlay(ctx, 'PAUSED', ['The museum waits. Press P to slip back into the dark.'], '#9fd8ff');
+  } else if (s.state === 'levelClear') {
+    overlay(ctx, 'CLEAN GETAWAY', [
+      `${s.levelName} cleared — loot ${s.lootTaken}/${s.lootTotal}`,
+      `Level score ${s.levelScore}   Total ${s.score}`,
+      s.ghost ? `GHOST bonus: the alarm never passed half. +${GHOST_BONUS}` : '',
+      'Press Enter for the next floor',
+    ].filter(Boolean), '#7dffb0');
+  } else if (s.state === 'win') {
+    overlay(ctx, 'THE PERFECT HEIST', [
+      `Every floor robbed. Final score ${s.score} in ${Math.floor(s.totalTime)}s.`,
+      'The Gilded Fox was never even seen. The museum still does not know.',
+      'Press R to run it back',
+    ], '#f5c542');
+  } else if (s.state === 'gameOver') {
+    overlay(ctx, 'CAUGHT', [
+      'The alarm screamed, the doors locked, and the Fox is in a cell.',
+      `Score ${s.score} — the museum keeps its gold this time.`,
+      'Press R to try again',
+    ], '#ff5b4d');
   }
 }
